@@ -27,5 +27,17 @@ export const env = {
   appleClientId: process.env.APPLE_CLIENT_ID,
   appleTeamId: process.env.APPLE_TEAM_ID,
   googleClientId: process.env.GOOGLE_CLIENT_ID,
+  // App provisioning
+  githubToken: process.env.GITHUB_TOKEN,
+  cloudflareAccountId: process.env.CLOUDFLARE_ACCOUNT_ID,
+  cloudflareApiToken: process.env.CLOUDFLARE_API_TOKEN,
+  firebaseProjectId: process.env.FIREBASE_PROJECT_ID,
+  firebaseServiceEmail: process.env.FIREBASE_SERVICE_EMAIL,
+  firebaseServiceKey: process.env.FIREBASE_SERVICE_KEY,
+  firebaseWebApiKey: process.env.FIREBASE_WEB_API_KEY,
+  firebaseAuthDomain: process.env.FIREBASE_AUTH_DOMAIN,
+  firebaseStorageBucket: process.env.FIREBASE_STORAGE_BUCKET,
+  firebaseMessagingSenderId: process.env.FIREBASE_MESSAGING_SENDER_ID,
+  firebaseWebAppId: process.env.FIREBASE_WEB_APP_ID,
   port: parseInt(process.env.PORT || '3000', 10),
 };

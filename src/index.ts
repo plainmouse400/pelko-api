@@ -2,6 +2,7 @@ import './config/env'; // Validate env vars on startup
 import express from 'express';
 import cors from 'cors';
 import authRoutes from './routes/auth';
+import appsRoutes from './routes/apps';
 import { errorHandler } from './middleware/errorHandler';
 
 const app = express();
@@ -23,6 +24,9 @@ app.get('/health', (_req, res) => res.json({ status: 'ok' }));
 
 // Auth routes
 app.use('/auth', authRoutes);
+
+// App provisioning routes
+app.use('/apps', appsRoutes);
 
 // Error handler
 app.use(errorHandler);
