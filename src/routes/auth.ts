@@ -46,7 +46,8 @@ router.post('/request-code', codeRequestLimiter, async (req: Request, res: Respo
 
     // Generate and store code
     const code = await storeCode(app.app_id, target, targetType as 'phone' | 'email');
-
+    console.log(`[DEV] Verification code for ${target}: ${code}`);
+    
     // Deliver the code
     if (targetType === 'phone') {
       // Try push first (free), fall back to SMS (paid)
