@@ -62,19 +62,59 @@ export async function runBuilderAgent(
   let codeUpdate: BuilderResponse['codeUpdate'] = null;
 
   if (codeMatch) {
+  try {
+    // Clean up the raw output before parsing
+    // Claude sometimes outputs code with literal newlines inside JSON string values
+    // We need to preserve the structure but fix the escaping
+    let rawJson = codeMatch[1].trim();
+    
+    // Try parsing directly first
     try {
-      const parsed = JSON.parse(codeMatch[1].trim());
+      const parsed = JSON.parse(rawJson);
       codeUpdate = {
         label: parsed.label || 'Updated app',
         files: parsed.files || {},
         testData: parsed.testData || null,
         previewDisplay: parsed.previewDisplay || { mode: 'single' },
       };
-    } catch (e) {
-      console.error('Failed to parse pelko_code block:', e);
-      // If parsing fails, just return the conversation text without code
+    } catch {
+      // If direct parse fails, try to extract files using regex
+      // This handles cases where code content has unescaped characters
+      const labelMatch = rawJson.match(/"label"\s*:\s*"([^"]*?)"/);
+      const filesMatch = rawJson.match(/"files"\s*:\s*\{([\s\S]*)\}\s*,?\s*"testData"/);
+      
+      if (filesMatch) {
+        // Extract individual file entries
+        const filesBlock = filesMatch[1];
+        const fileEntries: Record<string, string> = {};
+        
+        // Match each "filename": "content" pair
+        // Use a greedy approach: find filename, then capture everything until the next filename or end
+        const fileRegex = /"([^"]+\.tsx?)"\s*:\s*"([\s\S]*?)(?:"\s*,\s*"|"\s*\})/g;
+        let match;
+        while ((match = fileRegex.exec(filesBlock)) !== null) {
+          const filename = match[1];
+          // Unescape the content
+          const content = match[2]
+            .replace(/\\n/g, '\n')
+            .replace(/\\t/g, '\t')
+            .replace(/\\"/g, '"')
+            .replace(/\\\\/g, '\\');
+          fileEntries[filename] = content;
+        }
+        
+        codeUpdate = {
+          label: labelMatch?.[1] || 'Updated app',
+          files: fileEntries,
+          testData: null,
+          previewDisplay: { mode: 'single' },
+        };
+      }
     }
+  } catch (e) {
+    console.error('Failed to parse pelko_code block:', e);
   }
+}
 
   const usage = {
     inputTokens: response.usage.input_tokens,
