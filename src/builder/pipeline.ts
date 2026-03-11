@@ -50,7 +50,7 @@ export async function runBuilderPipeline(
     .from('creator_apps')
     .update({ last_edited_at: new Date().toISOString() })
     .eq('app_id', appId)
-    .catch(() => {});
+    .then(undefined, () => {});
 
   // 8. Update session code state
   if (parsed.codeUpdate?.files) {
