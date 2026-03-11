@@ -20,7 +20,7 @@ export async function generateEmbedding(
     throw new Error(`Voyage embedding API error: ${response.status}`);
   }
 
-  const data = await response.json();
+  const data = await response.json() as { data: Array<{ embedding: number[] }> };
   return data.data[0].embedding;
 }
 

@@ -76,7 +76,7 @@ export async function runBuilderPipeline(
     { session_id: session.id, metric_name: 'memories_retrieved_count', metric_value: context.memoriesRetrieved },
     { session_id: session.id, metric_name: 'files_included_count', metric_value: context.filesIncluded.length },
   ];
-  supabase.from('builder_metrics').insert(metricsToInsert).then().catch(() => {});
+  supabase.from('builder_metrics').insert(metricsToInsert).then(undefined, () => {});
 
   // 12. Retrieval relevance scoring (every 50th request, fire-and-forget)
   if (context.retrievedMemoryDetails.length > 0 && session.messageCount % 50 === 0) {
