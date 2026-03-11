@@ -1,6 +1,7 @@
 import { Router, Request, Response } from 'express';
 import { validatePelkoUser } from '../middleware/validatePelkoUser';
 import { runBuilderPipeline } from '../builder/pipeline';
+import { streamBuilderAgent } from '../services/builderAgent';
 import { getOrCreateSession, getSessionMessages } from '../services/sessionService';
 import { getUserUsageToday } from '../services/usageService';
 import { supabase } from '../config/supabase';
@@ -26,6 +27,35 @@ router.post('/message', async (req: Request, res: Response) => {
   } catch (err: any) {
     console.error('Builder message error:', err);
     return res.status(500).json({ error: 'Failed to process message' });
+  }
+});
+
+// POST /builder/message/stream — Send a message and receive a streaming response via SSE
+router.post('/message/stream', async (req: Request, res: Response) => {
+  try {
+    const { userId } = (req as any).pelkoUser;
+    const { appId, message, conversationHistory, currentCode, appMemory } = req.body;
+
+    if (!message) {
+      return res.status(400).json({ error: 'message is required' });
+    }
+
+    await streamBuilderAgent(
+      res,
+      userId,
+      appId || null,
+      currentCode || {},
+      conversationHistory || [],
+      message,
+      appMemory || null
+    );
+
+  } catch (err: any) {
+    console.error('Stream builder error:', err);
+    if (!res.headersSent) {
+      return res.status(500).json({ error: 'Failed to start stream' });
+    }
+    res.end();
   }
 });
 
