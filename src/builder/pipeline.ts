@@ -45,6 +45,13 @@ export async function runBuilderPipeline(
   // 7. Store assistant message
   await storeMessage(session.id, 'assistant', parsed.conversationText, parsed.codeUpdate, llmResponse.usage);
 
+  // 7b. Update app's last_edited_at (non-critical)
+  supabase
+    .from('creator_apps')
+    .update({ last_edited_at: new Date().toISOString() })
+    .eq('app_id', appId)
+    .catch(() => {});
+
   // 8. Update session code state
   if (parsed.codeUpdate?.files) {
     const updatedCode = { ...session.currentCode, ...parsed.codeUpdate.files };
