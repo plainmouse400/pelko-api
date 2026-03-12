@@ -1,9 +1,9 @@
 import { Router, Request, Response } from 'express';
 import { validatePelkoUser } from '../middleware/validatePelkoUser';
 import { runBuilderPipeline } from '../builder/pipeline';
-import { streamBuilderAgent } from '../services/builderAgent';
 import { getOrCreateSession, getSessionMessages } from '../services/sessionService';
 import { getUserUsageToday } from '../services/usageService';
+import { createTicket } from '../services/wsTickets';
 import { supabase } from '../config/supabase';
 
 const router = Router();
@@ -30,32 +30,33 @@ router.post('/message', async (req: Request, res: Response) => {
   }
 });
 
-// POST /builder/message/stream — Send a message and receive a streaming response via SSE
-router.post('/message/stream', async (req: Request, res: Response) => {
+// POST /builder/ws-ticket — Get a short-lived ticket for WebSocket auth
+router.post('/ws-ticket', async (req: Request, res: Response) => {
   try {
     const { userId } = (req as any).pelkoUser;
-    const { appId, message, conversationHistory, currentCode, appMemory } = req.body;
+    const { appId } = req.body;
 
-    if (!message) {
-      return res.status(400).json({ error: 'message is required' });
+    if (!appId) {
+      return res.status(400).json({ error: 'appId is required' });
     }
 
-    await streamBuilderAgent(
-      res,
-      userId,
-      appId || null,
-      currentCode || {},
-      conversationHistory || [],
-      message,
-      appMemory || null
-    );
+    // Verify the user owns this app
+    const { data: app } = await supabase
+      .from('creator_apps')
+      .select('app_id')
+      .eq('app_id', appId)
+      .eq('pelko_user_id', userId)
+      .single();
 
+    if (!app) {
+      return res.status(404).json({ error: 'App not found' });
+    }
+
+    const ticket = createTicket(userId, appId);
+    return res.json({ ticket });
   } catch (err: any) {
-    console.error('Stream builder error:', err);
-    if (!res.headersSent) {
-      return res.status(500).json({ error: 'Failed to start stream' });
-    }
-    res.end();
+    console.error('WS ticket error:', err);
+    return res.status(500).json({ error: 'Failed to create ticket' });
   }
 });
 

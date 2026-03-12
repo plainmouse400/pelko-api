@@ -10,6 +10,8 @@ export interface BuilderSession {
   currentCode: Record<string, string>;
   fileIndex: Array<{ filename: string; keywords: string[]; description: string }>;
   messageCount: number;
+  codePointer: number | null;
+  revertedLabels: string[] | null;
 }
 
 export interface BuilderMessage {
@@ -44,6 +46,8 @@ export async function getOrCreateSession(userId: string, appId: string): Promise
       currentCode: existing.current_code,
       fileIndex: existing.file_index,
       messageCount: existing.message_count,
+      codePointer: existing.code_pointer ?? null,
+      revertedLabels: existing.reverted_labels ?? null,
     };
   }
 
@@ -75,6 +79,8 @@ export async function getOrCreateSession(userId: string, appId: string): Promise
     currentCode: newSession.current_code,
     fileIndex: newSession.file_index,
     messageCount: newSession.message_count,
+    codePointer: null,
+    revertedLabels: null,
   };
 }
 

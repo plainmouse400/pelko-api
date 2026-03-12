@@ -14,7 +14,7 @@ export async function v1StandardLLMCaller(
 ): Promise<RawLLMResponse> {
   const response = await anthropic.messages.create({
     model: config.builderModel || 'claude-sonnet-4-20250514',
-    max_tokens: config.maxOutputTokens || 8000,
+    max_tokens: config.maxOutputTokens || 16384,
     temperature: config.temperature || 0.7,
     system: context.system,
     messages: context.messages,

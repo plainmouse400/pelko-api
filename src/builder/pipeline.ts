@@ -13,98 +13,200 @@ export interface PipelineResult {
   sessionId: string;
 }
 
+// ---- Stage 1 ----
+// Load/create session, store user message, assemble full context (memory, files, brief).
+
+export async function preparePipelineContext(
+  userId: string,
+  appId: string,
+  message: string
+): Promise<{
+  session: BuilderSession;
+  context: FullContext;
+  userMessage: string;
+  config: Record<string, any>;
+}> {
+  const session = await getOrCreateSession(userId, appId);
+  const config = session.resolvedConfig;
+
+  await storeMessage(session.id, 'user', message, null, null);
+  session.messageCount += 1;
+
+  const context = await dispatchContextAssembler(session, message, config);
+
+  return { session, context, userMessage: message, config };
+}
+
+// ---- Stage 3 ----
+// Parse full response text, persist messages, update session state, fire memory updater.
+// Call this after Claude has returned a complete response (streaming or non-streaming).
+
+export async function finalizePipeline(
+  session: BuilderSession,
+  userMessage: string,
+  fullText: string,
+  usage: { inputTokens: number; outputTokens: number },
+  config: Record<string, any>
+): Promise<{ conversationText: string; codeUpdate: ParsedResponse['codeUpdate'] }> {
+  const parsed = dispatchResponseParser({ fullText, usage }, config);
+
+  await storeMessage(session.id, 'assistant', parsed.conversationText, parsed.codeUpdate, usage);
+
+  // Update app's last_edited_at (non-critical)
+  supabase
+    .from('creator_apps')
+    .update({ last_edited_at: new Date().toISOString() })
+    .eq('app_id', session.appId)
+    .then(undefined, () => {});
+
+  if (parsed.codeUpdate?.files) {
+    const updatedCode = { ...session.currentCode, ...parsed.codeUpdate.files };
+    await supabase
+      .from('builder_sessions')
+      .update({
+        current_code: updatedCode,
+        code_pointer: null,      // Reset to latest after new code
+        reverted_labels: null,   // Clear reverted context — Claude has written from this state
+      })
+      .eq('id', session.id);
+    session.currentCode = updatedCode;
+  }
+
+  // Fire-and-forget memory update
+  dispatchMemoryUpdater(session, {
+    userMessage,
+    assistantMessage: parsed.conversationText,
+    codeUpdate: parsed.codeUpdate,
+  }, config).catch(err => console.error('Memory updater error (non-blocking):', err));
+
+  await trackUsage({
+    userId: session.userId,
+    appId: session.appId,
+    model: config.builderModel || 'claude-sonnet-4-20250514',
+    tokensIn: usage.inputTokens,
+    tokensOut: usage.outputTokens,
+    interactionType: 'builder',
+  });
+
+  // Per-request metrics (fire-and-forget)
+  supabase.from('builder_metrics').insert([
+    { session_id: session.id, metric_name: 'builder_input_tokens', metric_value: usage.inputTokens },
+    { session_id: session.id, metric_name: 'builder_output_tokens', metric_value: usage.outputTokens },
+  ]).then(undefined, () => {});
+
+  return { conversationText: parsed.conversationText, codeUpdate: parsed.codeUpdate };
+}
+
+// ---- Full non-streaming pipeline (existing endpoint fallback) ----
+
 export async function runBuilderPipeline(
   userId: string,
   appId: string,
   creatorMessage: string
 ): Promise<PipelineResult> {
-  // 1. Load/create session
-  const session = await getOrCreateSession(userId, appId);
-  const config = session.resolvedConfig;
+  const { session, context, userMessage, config } = await preparePipelineContext(userId, appId, creatorMessage);
 
-  // 2. Store user message
-  await storeMessage(session.id, 'user', creatorMessage, null, null);
-  session.messageCount += 1;
-
-  // 3. Assemble context
-  const context = await dispatchContextAssembler(session, creatorMessage, config);
-
-  // 4. Call LLM
   let llmResponse = await dispatchLLMCaller(context, config);
-
-  // 5. Parse response
   let parsed = dispatchResponseParser(llmResponse, config);
 
-  // 6. Handle file requests (follow-up call if needed)
+  // Handle file requests (follow-up call if needed)
   if (parsed.requestedFiles && parsed.requestedFiles.length > 0) {
     const updatedContext = addRequestedFiles(context, parsed.requestedFiles, session.currentCode);
     llmResponse = await dispatchLLMCaller(updatedContext, config);
-    parsed = dispatchResponseParser(llmResponse, config);
   }
 
-  // 7. Store assistant message
-  await storeMessage(session.id, 'assistant', parsed.conversationText, parsed.codeUpdate, llmResponse.usage);
+  const result = await finalizePipeline(session, userMessage, llmResponse.fullText, llmResponse.usage, config);
 
-  // 7b. Update app's last_edited_at (non-critical)
-  supabase
-    .from('creator_apps')
-    .update({ last_edited_at: new Date().toISOString() })
-    .eq('app_id', appId)
-    .then(undefined, () => {});
-
-  // 8. Update session code state
-  if (parsed.codeUpdate?.files) {
-    const updatedCode = { ...session.currentCode, ...parsed.codeUpdate.files };
-    await supabase.from('builder_sessions').update({ current_code: updatedCode }).eq('id', session.id);
-    session.currentCode = updatedCode;
-  }
-
-  // 9. Fire-and-forget memory update (also handles summary quality sampling)
-  dispatchMemoryUpdater(session, {
-    userMessage: creatorMessage,
-    assistantMessage: parsed.conversationText,
-    codeUpdate: parsed.codeUpdate,
-  }, config).catch(err => console.error('Memory updater error (non-blocking):', err));
-
-  // 10. Track usage — builder call (primary cost)
-  await trackUsage({
-    userId, appId,
-    model: config.builderModel || 'claude-sonnet-4-20250514',
-    tokensIn: llmResponse.usage.inputTokens,
-    tokensOut: llmResponse.usage.outputTokens,
-    interactionType: 'builder',
-  });
-
-  // 11. Track per-component metrics (all fire-and-forget)
-  const metricsToInsert = [
-    { session_id: session.id, metric_name: 'context_tokens_per_call', metric_value: context.contextTokenEstimate },
-    { session_id: session.id, metric_name: 'builder_input_tokens', metric_value: llmResponse.usage.inputTokens },
-    { session_id: session.id, metric_name: 'builder_output_tokens', metric_value: llmResponse.usage.outputTokens },
-    { session_id: session.id, metric_name: 'memories_retrieved_count', metric_value: context.memoriesRetrieved },
-    { session_id: session.id, metric_name: 'files_included_count', metric_value: context.filesIncluded.length },
-  ];
-  supabase.from('builder_metrics').insert(metricsToInsert).then(undefined, () => {});
-
-  // 12. Retrieval relevance scoring (every 50th request, fire-and-forget)
+  // Retrieval relevance scoring (every 50th request, fire-and-forget)
   if (context.retrievedMemoryDetails.length > 0 && session.messageCount % 50 === 0) {
     scoreRetrievalRelevance(
-      session, creatorMessage, parsed.conversationText,
+      session, creatorMessage, result.conversationText,
       context.retrievedMemoryDetails, config
     ).catch(err => console.error('Retrieval scoring error (non-blocking):', err));
   }
 
   return {
-    conversationText: parsed.conversationText,
-    codeUpdate: parsed.codeUpdate,
+    conversationText: result.conversationText,
+    codeUpdate: result.codeUpdate,
     usage: llmResponse.usage,
     sessionId: session.id,
   };
 }
 
-/**
- * Score whether retrieved memories were relevant to the request.
- * Runs as a cheap Haiku call, fire-and-forget.
- */
+// ---- Exported helper for file request follow-up in streaming context ----
+
+export function addRequestedFiles(
+  context: FullContext,
+  requestedFiles: string[],
+  currentCode: Record<string, string>
+): FullContext {
+  let additionalCode = '\n\n## Requested Files\n';
+  for (const filename of requestedFiles) {
+    const code = currentCode[filename];
+    additionalCode += code
+      ? `\n### ${filename}\n\`\`\`tsx\n${code}\n\`\`\`\n`
+      : `\n### ${filename}\n(file not found)\n`;
+  }
+
+  return {
+    ...context,
+    system: context.system + additionalCode,
+    messages: [
+      ...context.messages.slice(0, -1),
+      { role: 'user' as const, content: `Here are the files you requested. Please continue.\n\n${context.messages[context.messages.length - 1].content}` },
+    ],
+    filesIncluded: [...context.filesIncluded, ...requestedFiles],
+  };
+}
+
+// ---- Interface dispatchers ----
+
+function dispatchContextAssembler(
+  session: BuilderSession,
+  message: string,
+  config: Record<string, any>
+): Promise<FullContext> {
+  const name = config.interfaces?.contextAssembler || 'v1-hybrid';
+  switch (name) {
+    case 'v1-hybrid': return v1HybridContextAssembler(session, message);
+    default: throw new Error(`Unknown context assembler: ${name}`);
+  }
+}
+
+function dispatchLLMCaller(
+  context: FullContext,
+  config: Record<string, any>
+): Promise<RawLLMResponse> {
+  const name = config.interfaces?.llmCaller || 'v1-standard';
+  switch (name) {
+    case 'v1-standard': return v1StandardLLMCaller(context, config);
+    default: throw new Error(`Unknown LLM caller: ${name}`);
+  }
+}
+
+function dispatchResponseParser(
+  response: RawLLMResponse,
+  config: Record<string, any>
+): ParsedResponse {
+  const name = config.interfaces?.responseParser || 'v1-standard';
+  switch (name) {
+    case 'v1-standard': return v1StandardResponseParser(response);
+    default: throw new Error(`Unknown response parser: ${name}`);
+  }
+}
+
+function dispatchMemoryUpdater(
+  session: BuilderSession,
+  exchange: { userMessage: string; assistantMessage: string; codeUpdate: any },
+  config: Record<string, any>
+): Promise<void> {
+  const name = config.interfaces?.memoryUpdater || 'v1-hierarchical';
+  switch (name) {
+    case 'v1-hierarchical': return v1HierarchicalMemoryUpdater(session, exchange, config);
+    default: throw new Error(`Unknown memory updater: ${name}`);
+  }
+}
+
 async function scoreRetrievalRelevance(
   session: BuilderSession,
   creatorMessage: string,
@@ -145,14 +247,12 @@ async function scoreRetrievalRelevance(
       relevance_notes: parsed.notes,
     });
 
-    // Also track as a metric for easy aggregation
     await supabase.from('builder_metrics').insert({
       session_id: session.id,
       metric_name: 'retrieval_relevance_score',
       metric_value: parsed.score,
     });
 
-    // Track the Haiku cost for this scoring call
     await trackUsage({
       userId: session.userId, appId: session.appId,
       model: config.summaryModel || 'claude-haiku-4-5-20251001',
@@ -163,62 +263,4 @@ async function scoreRetrievalRelevance(
   } catch (e) {
     console.error('Failed to parse retrieval score:', e);
   }
-}
-
-// ---- Interface dispatchers ----
-
-function dispatchContextAssembler(session: BuilderSession, message: string, config: Record<string, any>): Promise<FullContext> {
-  const name = config.interfaces?.contextAssembler || 'v1-hybrid';
-  switch (name) {
-    case 'v1-hybrid': return v1HybridContextAssembler(session, message);
-    default: throw new Error(`Unknown context assembler: ${name}`);
-  }
-}
-
-function dispatchLLMCaller(context: FullContext, config: Record<string, any>): Promise<RawLLMResponse> {
-  const name = config.interfaces?.llmCaller || 'v1-standard';
-  switch (name) {
-    case 'v1-standard': return v1StandardLLMCaller(context, config);
-    default: throw new Error(`Unknown LLM caller: ${name}`);
-  }
-}
-
-function dispatchResponseParser(response: RawLLMResponse, config: Record<string, any>): ParsedResponse {
-  const name = config.interfaces?.responseParser || 'v1-standard';
-  switch (name) {
-    case 'v1-standard': return v1StandardResponseParser(response);
-    default: throw new Error(`Unknown response parser: ${name}`);
-  }
-}
-
-function dispatchMemoryUpdater(
-  session: BuilderSession,
-  exchange: { userMessage: string; assistantMessage: string; codeUpdate: any },
-  config: Record<string, any>
-): Promise<void> {
-  const name = config.interfaces?.memoryUpdater || 'v1-hierarchical';
-  switch (name) {
-    case 'v1-hierarchical': return v1HierarchicalMemoryUpdater(session, exchange, config);
-    default: throw new Error(`Unknown memory updater: ${name}`);
-  }
-}
-
-function addRequestedFiles(context: FullContext, requestedFiles: string[], currentCode: Record<string, string>): FullContext {
-  let additionalCode = '\n\n## Requested Files\n';
-  for (const filename of requestedFiles) {
-    const code = currentCode[filename];
-    additionalCode += code
-      ? `\n### ${filename}\n\`\`\`tsx\n${code}\n\`\`\`\n`
-      : `\n### ${filename}\n(file not found)\n`;
-  }
-
-  return {
-    ...context,
-    system: context.system + additionalCode,
-    messages: [
-      ...context.messages.slice(0, -1),
-      { role: 'user' as const, content: `Here are the files you requested. Please continue.\n\n${context.messages[context.messages.length - 1].content}` },
-    ],
-    filesIncluded: [...context.filesIncluded, ...requestedFiles],
-  };
 }

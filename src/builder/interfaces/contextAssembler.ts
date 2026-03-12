@@ -60,6 +60,16 @@ export async function v1HybridContextAssembler(
     }
   }
 
+  // 4b. Reverted labels (set when the creator has undone code changes)
+  if (session.revertedLabels && session.revertedLabels.length > 0) {
+    systemPrompt += `\n\n## Recently Reverted Changes\n`;
+    systemPrompt += `The creator rolled back the app. These changes are no longer in the current code:\n`;
+    for (const label of session.revertedLabels) {
+      systemPrompt += `- ${label}\n`;
+    }
+    systemPrompt += `\nThis is context for when you next generate code. Do NOT proactively mention these reverted changes in conversation — only consider them when you are about to write new code. At that point, if it seems like the creator may not realize they lost functionality that is relevant to what they are asking for, briefly ask if they want to preserve any of it. If the creator's intent is clear and they obviously know what they rolled back, just proceed without asking.\n`;
+  }
+
   // 5. Retrieved memory summaries
   let memoriesRetrieved = 0;
   let retrievedMemoryDetails: Array<{ id: string; level: number; content: string; similarity: number }> = [];
