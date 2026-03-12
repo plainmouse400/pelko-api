@@ -90,10 +90,10 @@ export async function handleBuilderConnection(ws: WebSocket, req: IncomingMessag
     if (appConnections.get(appId)?.size === 0) {
       appConnections.delete(appId);
     }
-    if (activeStream) {
-      activeStream.abort();
-      activeStream = null;
-    }
+    // Do NOT abort activeStream here. Let Claude finish in the background
+    // so finalizePipeline runs and the messages get saved to the DB.
+    // When the user reconnects, they'll get the completed response via session_state.
+    // Only an explicit 'stop' message from the user should abort the stream.
   });
 
   async function handleSendMessage(message: string) {
@@ -238,13 +238,15 @@ export async function handleBuilderConnection(ws: WebSocket, req: IncomingMessag
       }
 
       // Stage 3: persist messages, update session, fire memory updater
-      await finalizePipeline(ctx.session, ctx.userMessage, fullText, finalUsage, ctx.config);
+      const result = await finalizePipeline(ctx.session, ctx.userMessage, fullText, finalUsage, ctx.config);
 
       // Get updated undo/redo depths after finalization
       const depths = await getUndoRedoDepths(ctx.session.id);
 
       broadcast(appId, {
         type: 'stream_done',
+        assistantMessage: result.conversationText,
+        codeUpdate: result.codeUpdate,
         usage: finalUsage,
         undoDepth: depths.undoDepth,
         redoDepth: depths.redoDepth,
